@@ -230,7 +230,7 @@ ${sel('[data-sir-off="1"]')},
      * ------------------------------------------------------------------ */
 
     function readSettings() {
-      const fallback = { size: DEFAULT_SIZE, hidden: {} };
+      const fallback = { size: DEFAULT_SIZE, hidden: {}, order: [] };
       try {
         const raw = window.localStorage.getItem(STORE_KEY);
         if (!raw) return fallback;
@@ -238,7 +238,11 @@ ${sel('[data-sir-off="1"]')},
         const size = SIZES.indexOf(parsed && parsed.size) >= 0 ? parsed.size : DEFAULT_SIZE;
         const hidden =
           parsed && parsed.hidden && typeof parsed.hidden === 'object' ? parsed.hidden : {};
-        return { size, hidden };
+        const order =
+          parsed && Array.isArray(parsed.order)
+            ? parsed.order.filter((key) => typeof key === 'string')
+            : [];
+        return { size, hidden, order };
       } catch {
         return fallback;
       }
@@ -277,6 +281,52 @@ ${sel('[data-sir-off="1"]')},
       const root = document.documentElement;
       root.style.setProperty('--sir-icon', `${settings.size}px`);
       root.style.setProperty('--sir-square', `${settings.size + 18}px`);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Order
+     * ------------------------------------------------------------------ */
+
+    /** Keys of one container, in discovery order. */
+    function groupKeys(group) {
+      return Array.from(discovered.entries())
+        .filter(([, meta]) => meta.group === group)
+        .map(([key]) => key);
+    }
+
+    /**
+     * Keys of one container in their current visual order. Entries the user has
+     * not reordered yet sort after the ordered ones, in discovery order.
+     */
+    function effectiveOrder(group) {
+      const ranked = groupKeys(group).map((key, index) => {
+        const position = settings.order.indexOf(key);
+        return { key, rank: position >= 0 ? position : 1000 + index };
+      });
+      ranked.sort((a, b) => a.rank - b.rank);
+      return ranked.map((entry) => entry.key);
+    }
+
+    /** Swap one entry with its neighbour inside its own container. */
+    function moveEntry(key, group, delta) {
+      const keys = effectiveOrder(group);
+      const index = keys.indexOf(key);
+      const next = index + delta;
+      if (index < 0 || next < 0 || next >= keys.length) return;
+      const swapped = keys.slice();
+      swapped[index] = keys[next];
+      swapped[next] = keys[index];
+      const panel = group === 'panel' ? swapped : effectiveOrder('panel');
+      const footer = group === 'footer' ? swapped : effectiveOrder('footer');
+      settings.order = panel.concat(footer);
+      persist();
+      scan();
+    }
+
+    function resetOrder() {
+      settings.order = [];
+      persist();
+      scan();
     }
 
     /* ------------------------------------------------------------------ *
@@ -338,6 +388,7 @@ ${sel('[data-sir-off="1"]')},
       applyTokens();
       let changed = false;
       const seen = new Set();
+      let natural = 0;
       for (const { el, group } of entryNodes()) {
         const { key, label } = describe(el);
         const previous = discovered.get(key);
@@ -347,6 +398,15 @@ ${sel('[data-sir-off="1"]')},
         }
         seen.add(key);
         el.setAttribute('data-sir-key', key);
+
+        const position = settings.order.indexOf(key);
+        if (settings.order.length === 0) {
+          el.style.removeProperty('order');
+        } else {
+          el.style.setProperty('order', String(position >= 0 ? position : 1000 + natural));
+        }
+        natural += 1;
+
         const wasOff = el.getAttribute('data-sir-off') === '1';
         if (settings.hidden[key]) {
           el.setAttribute('data-sir-off', '1');
@@ -428,7 +488,34 @@ ${sel('[data-sir-off="1"]')},
       );
     }
 
-    function entryRow(key, label) {
+    function arrowButton(glyph, enabled, onClick, ariaLabel) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          'aria-label': ariaLabel,
+          disabled: !enabled,
+          onClick,
+          style: {
+            flex: 'none',
+            width: '24px',
+            height: '24px',
+            padding: 0,
+            borderRadius: '6px',
+            border: '1px solid var(--dsw-alias-border-l2, #e2e4e8)',
+            background: 'transparent',
+            color: 'var(--dsw-alias-label-secondary, #6b7280)',
+            cursor: enabled ? 'pointer' : 'default',
+            opacity: enabled ? 1 : 0.35,
+            fontSize: '12px',
+            lineHeight: '20px',
+          },
+        },
+        glyph,
+      );
+    }
+
+    function entryRow(key, label, group, canUp, canDown) {
       const on = !settings.hidden[key];
       return h(
         'div',
@@ -456,6 +543,12 @@ ${sel('[data-sir-off="1"]')},
             },
           },
           label,
+        ),
+        h(
+          'span',
+          { style: { display: 'flex', gap: '4px', flex: 'none' } },
+          arrowButton('↑', canUp, () => moveEntry(key, group, -1), `${label} 上移`),
+          arrowButton('↓', canDown, () => moveEntry(key, group, 1), `${label} 下移`),
         ),
         h(
           'button',
@@ -521,8 +614,8 @@ ${sel('[data-sir-off="1"]')},
       }
 
       const grouped = [
-        ['panel', entries.filter(([, meta]) => meta.group === 'panel')],
-        ['footer', entries.filter(([, meta]) => meta.group === 'footer')],
+        ['panel', effectiveOrder('panel')],
+        ['footer', effectiveOrder('footer')],
       ];
 
       return h(
@@ -538,24 +631,171 @@ ${sel('[data-sir-off="1"]')},
             SIZES.map(sizeButton),
           ),
         ),
-        ...grouped.map(([group, items]) =>
+        ...grouped.map(([group, keys]) =>
           h(
             'div',
             { key: group },
-            h('div', { style: sectionTitleStyle }, `${GROUPS[group]}（${items.length}）`),
-            items.length === 0
+            h('div', { style: sectionTitleStyle }, `${GROUPS[group]}（${keys.length}）`),
+            keys.length === 0
               ? h('div', { style: hintStyle }, '没有检测到入口。')
               : h(
                   'div',
                   { style: { display: 'flex', flexDirection: 'column', gap: '2px' } },
-                  items.map(([key, meta]) => entryRow(key, meta.label)),
+                  keys.map((key, index) => {
+                    const meta = discovered.get(key);
+                    return entryRow(
+                      key,
+                      meta ? meta.label : key,
+                      group,
+                      index > 0,
+                      index < keys.length - 1,
+                    );
+                  }),
                 ),
           ),
         ),
         h(
           'div',
           { style: hintStyle },
-          '关闭的入口会从侧栏隐藏，插件本身不受影响；新安装的插件会自动出现在上面的列表里，默认显示。',
+          '关闭的入口会从侧栏隐藏，插件本身不受影响；上下箭头调整图标在侧栏里的先后顺序；新安装的插件默认出现在末尾并保持显示。',
+        ),
+        settings.order.length > 0
+          ? h(
+              'button',
+              {
+                type: 'button',
+                onClick: resetOrder,
+                style: {
+                  alignSelf: 'flex-start',
+                  padding: 0,
+                  border: 0,
+                  background: 'transparent',
+                  color: 'var(--dsw-alias-label-secondary, #6b7280)',
+                  cursor: 'pointer',
+                  font: 'inherit',
+                  fontSize: '12px',
+                  textDecoration: 'underline',
+                },
+              },
+              '重置图标顺序',
+            )
+          : null,
+      );
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Settings entry (sidebar.footer.action)
+     * ------------------------------------------------------------------ */
+
+    function GearIcon() {
+      return h(
+        'svg',
+        {
+          viewBox: '0 0 24 24',
+          width: 16,
+          height: 16,
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+        },
+        h('circle', { cx: 12, cy: 12, r: 3 }),
+        h('path', {
+          d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z',
+        }),
+      );
+    }
+
+    function isVisible(el) {
+      return Boolean(el) && el.getClientRects().length > 0;
+    }
+
+    /** The account menu renders "设置" plus the shortcut hint as one row. */
+    function findSettingsMenuItem() {
+      const nodes = Array.from(document.querySelectorAll('button, [role="menuitem"], a'));
+      return (
+        nodes.find((el) => {
+          if (!isVisible(el)) return false;
+          const text = String(el.textContent || '').replace(/\s+/g, '');
+          return text.startsWith('设置') && text.length <= 12;
+        }) || null
+      );
+    }
+
+    /** The settings shell renders a stable modal marker. */
+    function settingsOpen() {
+      return Boolean(document.querySelector('[data-shortcut-modal="settings"]'));
+    }
+
+    /** Ctrl+, is the shipped `settings.open` binding. */
+    function pressSettingsShortcut() {
+      try {
+        document.body.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: ',',
+            code: 'Comma',
+            ctrlKey: true,
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+          }),
+        );
+      } catch {
+        /* no keyboard events: the menu fallback below still applies */
+      }
+    }
+
+    function openSettingsFromMenu() {
+      const item = findSettingsMenuItem();
+      if (item) {
+        item.click();
+        return;
+      }
+      const row = document.querySelector('[class*="triggerRow"]');
+      const trigger = row ? row.querySelector('button') : null;
+      if (!trigger) return;
+      const label = String(trigger.getAttribute('aria-label') || trigger.textContent || '')
+        .replace(/\s+/g, '')
+        .trim();
+      trigger.click();
+      /* A bare settings row (no launcher occupant) opens Settings itself. */
+      if (label.startsWith('设置')) return;
+      window.setTimeout(() => {
+        const late = findSettingsMenuItem();
+        if (late) late.click();
+      }, 200);
+    }
+
+    /**
+     * Open Settings without owning the shell.
+     *
+     * The settings seat is a single slot held by the account menu and the shell
+     * exposes no open action to outside plugins. The shipped shortcut opens it
+     * directly; when the binding was remapped, fall back to the account menu.
+     */
+    function openSettings() {
+      if (settingsOpen()) return;
+      pressSettingsShortcut();
+      window.setTimeout(() => {
+        if (settingsOpen()) return;
+        openSettingsFromMenu();
+      }, 140);
+    }
+
+    function SettingsEntry() {
+      return h(
+        'div',
+        null,
+        h(
+          'button',
+          {
+            type: 'button',
+            'aria-label': '设置',
+            onClick: openSettings,
+          },
+          h(GearIcon),
         ),
       );
     }
@@ -610,6 +850,18 @@ ${sel('[data-sir-off="1"]')},
               key: 'dsh-sidebar-icon-row',
             },
             ConfigView,
+          ),
+        );
+
+        ctx.slots.inject('sidebar.footer.action', () =>
+          ctx.slots.register(
+            {
+              name: 'sidebar.footer.action',
+              id: 'settings-entry',
+              order: 1,
+              label: '设置',
+            },
+            SettingsEntry,
           ),
         );
       },

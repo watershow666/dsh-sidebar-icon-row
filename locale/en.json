@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Sidebar Icon Row",
-    "description": "Turns the sidebar panel and footer entries into a compact row of icon-only squares with hover names; icon size and per-entry visibility are configurable."
+    "description": "Turns the sidebar panel and footer entries into a compact row of icon-only squares with hover names; icon size, per-entry visibility and order are configurable, and a Settings shortcut sits in the footer row."
   }
 }
