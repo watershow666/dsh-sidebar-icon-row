@@ -21,7 +21,7 @@
 # 安装（当前 profile；源码就放在 profile 的 local-plugins 下，不依赖工作区）
 dsh plugin install "E:\DeepseekHarness-data\data\profiles\desktop\local-plugins\sidebar-icon-row"
 # 卸载
-dsh plugin remove @local/sidebar-icon-row
+dsh plugin remove dsh-sidebar-icon-row
 ```
 
 安装后刷新页面；新增 bundle 首次加载可能需要重启一次 `dsh web`。

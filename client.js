@@ -1,5 +1,5 @@
 /**
- * Client half of `@local/sidebar-icon-row`.
+ * Client half of `dsh-sidebar-icon-row`.
  *
  * Two sidebar regions render contributions as full-width action rows:
  * `sidebar.panellist` (panel entries above the session tree) and
@@ -16,7 +16,7 @@
  * `plugins.bundle.config` cell and one stylesheet node.
  */
 window.__ModuleLoader__.load({
-  id: '@local/sidebar-icon-row',
+  id: 'dsh-sidebar-icon-row',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -574,7 +574,7 @@ ${sel('[data-sir-off="1"]')},
             if (!node) {
               node = document.createElement('style');
               node.id = STYLE_ID;
-              node.setAttribute('data-plugin-css', '@local/sidebar-icon-row');
+              node.setAttribute('data-plugin-css', 'dsh-sidebar-icon-row');
               document.head.appendChild(node);
             }
             node.textContent = CSS;
@@ -607,7 +607,7 @@ ${sel('[data-sir-off="1"]')},
           ctx.slots.register(
             {
               name: 'plugins.bundle.config',
-              key: '@local/sidebar-icon-row',
+              key: 'dsh-sidebar-icon-row',
             },
             ConfigView,
           ),
