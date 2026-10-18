@@ -1,0 +1,4 @@
+# 侧栏底部动作区图标并列：一个宿主空行，样式全部由 client.js 注入。
+- insert:
+    - id: sidebar-icon-row
+      name: '@local/sidebar-icon-row'
