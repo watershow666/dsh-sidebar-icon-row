@@ -8,7 +8,12 @@
  *
  *   - icon size (16 / 18 / 20 / 24 px, the square follows),
  *   - one show/hide switch per discovered entry, including entries that appear
- *     later from newly installed plugins.
+ *     later from newly installed plugins,
+ *   - custom entries: give any installed plugin an icon of its own (a text
+ *     glyph, since packages cannot ship their svg here) in the top panel list
+ *     or in the footer row. A panel entry registers its own `main` occupant
+ *     that redirects to the plugin's page through `pluginNavigation`, because a
+ *     panel row has to select a panel id it does not own.
  *
  * Settings live in localStorage; entries are discovered from the live DOM and
  * tagged with `data-sir-key` / `data-sir-off`, so hiding one never rewrites the
@@ -102,9 +107,24 @@ ${sel(' svg')}{
 }
 
 /* Hide the constant label; keep the accessible name on the button. */
-${sel(' button span:not(:has(svg))')},
+${sel(' button span:not(:has(svg)):not(.sir-glyph)')},
 ${sel(' .dshdr-foot-label')}{
   display: none !important;
+}
+
+/* ===== custom entries (pins): a text glyph instead of an icon ===== */
+.sir-glyph{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: none !important;
+  line-height: 1 !important;
+  font-weight: 600 !important;
+  font-family: inherit !important;
+  letter-spacing: 0 !important;
+  color: inherit !important;
+  user-select: none !important;
+  white-space: nowrap !important;
 }
 
 ${sel(':hover')}{
@@ -175,6 +195,21 @@ ${sel(' button[aria-label]:hover::after')}{
   height: var(--sir-icon, 18px) !important;
 }
 
+/* A custom entry fills the square so the whole tile is its click target. */
+[class*="panelRow"] [class*="panelGlyph"]:has([data-sir-pin]){
+  width: 100% !important;
+  height: 100% !important;
+}
+
+[data-sir-pin]{
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100% !important;
+  height: 100% !important;
+  cursor: pointer !important;
+}
+
 [class*="panelRow"][aria-label]{
   position: relative !important;
 }
@@ -229,8 +264,31 @@ ${sel('[data-sir-off="1"]')},
      * Settings
      * ------------------------------------------------------------------ */
 
+    /** Keys of custom entries carry this prefix so they never collide with a
+     * plugin's own entry that happens to use the same label. */
+    const PIN_PREFIX = 'pin:';
+    const PIN_ORDER_BASE = 40;
+    const MAX_GLYPH = 2;
+
+    function normalizePins(value) {
+      if (!Array.isArray(value)) return [];
+      const pins = [];
+      for (const item of value) {
+        if (!item || typeof item.name !== 'string' || !item.name) continue;
+        const label =
+          typeof item.label === 'string' && item.label.trim() ? item.label.trim() : item.name;
+        pins.push({
+          name: item.name,
+          label,
+          glyph: typeof item.glyph === 'string' ? item.glyph.slice(0, MAX_GLYPH) : '',
+          region: item.region === 'panel' ? 'panel' : 'footer',
+        });
+      }
+      return pins;
+    }
+
     function readSettings() {
-      const fallback = { size: DEFAULT_SIZE, hidden: {}, order: [] };
+      const fallback = { size: DEFAULT_SIZE, hidden: {}, order: [], pins: [] };
       try {
         const raw = window.localStorage.getItem(STORE_KEY);
         if (!raw) return fallback;
@@ -242,7 +300,8 @@ ${sel('[data-sir-off="1"]')},
           parsed && Array.isArray(parsed.order)
             ? parsed.order.filter((key) => typeof key === 'string')
             : [];
-        return { size, hidden, order };
+        const pins = normalizePins(parsed && parsed.pins);
+        return { size, hidden, order, pins };
       } catch {
         return fallback;
       }
@@ -287,10 +346,11 @@ ${sel('[data-sir-off="1"]')},
      * Order
      * ------------------------------------------------------------------ */
 
-    /** Keys of one container, in discovery order. */
+    /** Keys of one container, in discovery order. Custom entries are managed in
+     * their own section, so they stay out of the plugin entry lists. */
     function groupKeys(group) {
       return Array.from(discovered.entries())
-        .filter(([, meta]) => meta.group === group)
+        .filter(([key, meta]) => meta.group === group && !isPinKey(key))
         .map(([key]) => key);
     }
 
@@ -369,6 +429,13 @@ ${sel('[data-sir-off="1"]')},
           (button && button.getAttribute('aria-label')) ||
           '',
       ).trim();
+      /* A custom entry carries its own stable key, so it never shares state
+         with a plugin entry that happens to use the same label. */
+      const hint = String((el.getAttribute && el.getAttribute('data-sir-key-hint')) || '').trim();
+      if (hint) {
+        const text = aria || String((button && button.textContent) || el.textContent || '').trim();
+        return { key: hint, label: aria || text || hint };
+      }
       if (aria) return { key: aria, label: aria };
       const text = String(el.textContent || '')
         .replace(/\s+/g, ' ')
@@ -434,6 +501,258 @@ ${sel('[data-sir-off="1"]')},
         timer = 0;
         scan();
       }, 150);
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Custom entries: an icon for any installed plugin, top or bottom
+     * ------------------------------------------------------------------ */
+
+    /** Set by `apply`; slot and remote services are needed from the view. */
+    let pluginCtx = null;
+
+    const isPinKey = (key) => String(key).startsWith(PIN_PREFIX);
+
+    /** First character of a label, used when the user typed no glyph. */
+    function defaultGlyph(label) {
+      const text = String(label || '').trim();
+      const chars = Array.from(text);
+      return chars.length > 0 ? chars[0] : '?';
+    }
+
+    /** Strip the registry scope from a package name: `@local/x` becomes `x`. */
+    function shortName(name) {
+      const text = String(name || '');
+      const slash = text.lastIndexOf('/');
+      return slash >= 0 ? text.slice(slash + 1) : text;
+    }
+
+    /**
+     * Open an installed plugin's page in the plugin manager.
+     *
+     * `pluginNavigation.openBundle` selects the Plugins panel and shows that
+     * bundle, which works for every installed plugin whether or not it ships a
+     * sidebar entry of its own.
+     */
+    function openBundle(name) {
+      const ctx = pluginCtx;
+      if (!ctx) return false;
+      let nav = null;
+      try {
+        nav = typeof ctx.get === 'function' ? ctx.get('pluginNavigation') : null;
+      } catch {
+        /* the plugin manager bundle is not running; fall back below */
+      }
+      if (nav && typeof nav.openBundle === 'function') {
+        try {
+          nav.openBundle(name);
+          return true;
+        } catch {
+          /* fall through to the list */
+        }
+      }
+      if (nav && typeof nav.openList === 'function') {
+        try {
+          nav.openList();
+          return true;
+        } catch {
+          /* nothing else to try */
+        }
+      }
+      try {
+        if (ctx.layout && typeof ctx.layout.selectPanel === 'function') {
+          ctx.layout.selectPanel('plugins');
+          return true;
+        }
+      } catch {
+        /* no layout service either */
+      }
+      return false;
+    }
+
+    function PinGlyph(props) {
+      const pin = props.pin;
+      const text = pin.glyph || defaultGlyph(pin.label);
+      const width = Array.from(text).length > 1 ? 0.6 : 0.82;
+      return h(
+        'span',
+        {
+          className: 'sir-glyph',
+          style: { fontSize: `${Math.round(settings.size * width)}px` },
+          'aria-hidden': 'true',
+        },
+        text,
+      );
+    }
+
+    function FooterPin(props) {
+      const pin = props.pin;
+      return h(
+        'div',
+        { 'data-sir-key-hint': PIN_PREFIX + pin.name },
+        h(
+          'button',
+          {
+            type: 'button',
+            'aria-label': pin.label,
+            onClick: () => openBundle(pin.name),
+          },
+          h(PinGlyph, { pin }),
+        ),
+      );
+    }
+
+    function PanelPin(props) {
+      const pin = props.pin;
+      const ref = React.useRef(null);
+      React.useLayoutEffect(() => {
+        const node = ref.current;
+        const row = node && node.closest ? node.closest('[class*="panelRow"]') : null;
+        if (!row) return undefined;
+        row.setAttribute('data-sir-key-hint', PIN_PREFIX + pin.name);
+        return () => {
+          row.removeAttribute('data-sir-key-hint');
+        };
+      }, [pin.name]);
+      /* The row would select a panel id this entry does not own. Open the
+         plugin's own page instead and keep the current panel selection. */
+      const onClick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openBundle(pin.name);
+      };
+      return h(
+        'span',
+        { ref, 'data-sir-pin': pin.name, role: 'presentation', onClick },
+        h(PinGlyph, { pin }),
+      );
+    }
+
+    /** A top entry selects its own panel id; this occupant redirects at once. */
+    function PinOpener(props) {
+      const name = props.pin.name;
+      React.useEffect(() => {
+        openBundle(name);
+      }, [name]);
+      return null;
+    }
+
+    let pinDisposers = [];
+
+    function disposePins() {
+      for (const dispose of pinDisposers) {
+        try {
+          if (typeof dispose === 'function') dispose();
+        } catch {
+          /* already gone */
+        }
+      }
+      pinDisposers = [];
+    }
+
+    /** Re-register one slot entry per pin, in the region it was placed in. */
+    function reloadPins() {
+      disposePins();
+      const ctx = pluginCtx;
+      if (!ctx || !ctx.slots) return;
+      /** Register one slot contribution; a failure must not break the others. */
+      const own = (slot, register) => {
+        try {
+          const dispose = ctx.slots.inject(slot, register);
+          if (typeof dispose === 'function') pinDisposers.push(dispose);
+        } catch {
+          /* the slot is not declared in this shell build */
+        }
+      };
+      settings.pins.forEach((pin, index) => {
+        const id = `sir-pin-${index}`;
+        const shared = { label: pin.label, order: PIN_ORDER_BASE + index, inject: () => ({ pin }) };
+        if (pin.region === 'panel') {
+          own('sidebar.panellist', () =>
+            ctx.slots.register(Object.assign({ name: 'sidebar.panellist', id }, shared), PanelPin),
+          );
+          own('main', () =>
+            ctx.slots.register({ name: 'main', key: id, inject: () => ({ pin }) }, PinOpener),
+          );
+        } else {
+          own('sidebar.footer.action', () =>
+            ctx.slots.register(
+              Object.assign({ name: 'sidebar.footer.action', id }, shared),
+              FooterPin,
+            ),
+          );
+        }
+      });
+    }
+
+    /** Mutate the pin list, then persist; the subscription re-registers. */
+    function commitPins(next) {
+      settings.pins = next;
+      persist();
+      scan();
+    }
+
+    function addPin(name, glyph, region) {
+      const existing = settings.pins.find((pin) => pin.name === name);
+      if (existing) return;
+      const label = (pinLabels.get(name) || shortName(name)).trim();
+      const pins = settings.pins.concat([
+        { name, label, glyph: String(glyph || '').slice(0, MAX_GLYPH), region },
+      ]);
+      commitPins(pins);
+    }
+
+    function removePin(index) {
+      commitPins(settings.pins.filter((_, position) => position !== index));
+    }
+
+    function setPinRegion(index, region) {
+      commitPins(
+        settings.pins.map((pin, position) =>
+          position === index ? Object.assign({}, pin, { region }) : pin,
+        ),
+      );
+    }
+
+    function setPinGlyph(index, glyph) {
+      commitPins(
+        settings.pins.map((pin, position) =>
+          position === index ? Object.assign({}, pin, { glyph: glyph.slice(0, MAX_GLYPH) }) : pin,
+        ),
+      );
+    }
+
+    function movePin(index, delta) {
+      const next = index + delta;
+      if (index < 0 || next < 0 || next >= settings.pins.length) return;
+      const pins = settings.pins.slice();
+      const held = pins[index];
+      pins[index] = pins[next];
+      pins[next] = held;
+      commitPins(pins);
+    }
+
+    /** name -> readable title, learned when the installed plugin list loads. */
+    const pinLabels = new Map();
+
+    async function loadInstalledPlugins() {
+      const ctx = pluginCtx;
+      const manager = ctx && ctx.remote ? ctx.remote.pluginManager : null;
+      if (!manager || typeof manager.listBundles !== 'function') return [];
+      try {
+        const answer = await manager.listBundles();
+        if (!answer || answer.ok !== true || !Array.isArray(answer.value)) return [];
+        return answer.value
+          .filter((bundle) => bundle && typeof bundle.name === 'string' && bundle.installed !== false)
+          .map((bundle) => {
+            /* meta.title may be a locale reference, not text; only keep strings. */
+            const declared = bundle.meta && bundle.meta.title;
+            const title = typeof declared === 'string' && declared ? declared : shortName(bundle.name);
+            return { name: bundle.name, title, version: bundle.version };
+          })
+          .sort((a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN'));
+      } catch {
+        return [];
+      }
     }
 
     /* ------------------------------------------------------------------ *
@@ -595,15 +914,178 @@ ${sel('[data-sir-off="1"]')},
       );
     }
 
+    const selectStyle = {
+      minWidth: 0,
+      flex: '1 1 160px',
+      height: '32px',
+      padding: '0 8px',
+      borderRadius: '8px',
+      border: '1px solid var(--dsw-alias-border-l2, #e2e4e8)',
+      background: 'var(--dsw-alias-bg-layer-2, #ffffff)',
+      color: 'var(--dsw-alias-label-primary, #17191c)',
+      font: 'inherit',
+      fontSize: '13px',
+    };
+
+    const inputStyle = {
+      flex: 'none',
+      width: '52px',
+      height: '32px',
+      padding: '0 6px',
+      borderRadius: '8px',
+      border: '1px solid var(--dsw-alias-border-l2, #e2e4e8)',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-primary, #17191c)',
+      font: 'inherit',
+      fontSize: '13px',
+      textAlign: 'center',
+    };
+
+    function chipButton(label, active, onClick) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          'aria-pressed': active ? 'true' : 'false',
+          onClick,
+          style: {
+            flex: 'none',
+            height: '32px',
+            padding: '0 10px',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            font: 'inherit',
+            fontSize: '13px',
+            border: active
+              ? '1px solid var(--dsw-alias-state-business-primary, #1f6feb)'
+              : '1px solid var(--dsw-alias-border-l2, #e2e4e8)',
+            background: active
+              ? 'var(--dsw-alias-interactive-bg-hover, #eceff4)'
+              : 'transparent',
+            color: 'var(--dsw-alias-label-primary, inherit)',
+          },
+        },
+        label,
+      );
+    }
+
+    function pinRow(pin, index, total) {
+      const preview = pin.glyph || defaultGlyph(pin.label);
+      return h(
+        'div',
+        {
+          key: `${pin.name}-${index}`,
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            minWidth: 0,
+            padding: '6px 0',
+          },
+        },
+        h(
+          'span',
+          {
+            style: {
+              flex: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '24px',
+              height: '24px',
+              borderRadius: '6px',
+              background: 'var(--dsw-alias-interactive-bg-hover, #eceff4)',
+              fontSize: Array.from(preview).length > 1 ? '10px' : '13px',
+              fontWeight: 600,
+              lineHeight: 1,
+            },
+          },
+          preview,
+        ),
+        h(
+          'span',
+          {
+            style: {
+              flex: '1 1 auto',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              fontSize: '13px',
+              color: 'var(--dsw-alias-label-primary, inherit)',
+            },
+            title: pin.name,
+          },
+          pin.label,
+        ),
+        h(
+          'input',
+          {
+            style: Object.assign({}, inputStyle, { width: '46px', height: '24px' }),
+            value: pin.glyph,
+            placeholder: defaultGlyph(pin.label),
+            maxLength: MAX_GLYPH,
+            'aria-label': `${pin.label} 图标字符`,
+            onChange: (event) => setPinGlyph(index, event.target.value),
+          },
+        ),
+        h(
+          'span',
+          { style: { display: 'flex', gap: '4px', flex: 'none' } },
+          chipButton('上排', pin.region === 'panel', () =>
+            setPinRegion(index, pin.region === 'panel' ? 'footer' : 'panel'),
+          ),
+          arrowButton('↑', index > 0, () => movePin(index, -1), `${pin.label} 上移`),
+          arrowButton('↓', index < total - 1, () => movePin(index, 1), `${pin.label} 下移`),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            'aria-label': `删除 ${pin.label}`,
+            onClick: () => removePin(index),
+            style: {
+              flex: 'none',
+              height: '24px',
+              padding: '0 6px',
+              border: 0,
+              background: 'transparent',
+              color: 'var(--dsw-alias-label-tertiary, #8b9098)',
+              cursor: 'pointer',
+              font: 'inherit',
+              fontSize: '12px',
+            },
+          },
+          '删除',
+        ),
+      );
+    }
+
     function ConfigView(props) {
       const [, bump] = React.useState(0);
+      const [bundles, setBundles] = React.useState(null);
+      const [pick, setPick] = React.useState('');
+      const [glyphDraft, setGlyphDraft] = React.useState('');
+      const [region, setRegion] = React.useState('footer');
       React.useEffect(() => {
         const off = subscribe(() => bump((value) => value + 1));
         scan();
         return off;
       }, []);
+      React.useEffect(() => {
+        let alive = true;
+        loadInstalledPlugins().then((list) => {
+          if (!alive) return;
+          for (const item of list) pinLabels.set(item.name, item.title);
+          setBundles(list);
+          setPick((current) => current || (list.length > 0 ? list[0].name : ''));
+        });
+        return () => {
+          alive = false;
+        };
+      }, []);
 
-      const entries = Array.from(discovered.entries());
+      const entries = Array.from(discovered.entries()).filter(([key]) => !isPinKey(key));
       if (props && props.view === 'summary') {
         const shown = entries.filter(([key]) => !settings.hidden[key]).length;
         return h(
@@ -618,6 +1100,84 @@ ${sel('[data-sir-off="1"]')},
         ['footer', effectiveOrder('footer')],
       ];
 
+      const picked = bundles ? bundles.find((item) => item.name === pick) : null;
+      const pickedTitle = picked ? picked.title : '';
+
+      const customSection = h(
+        'div',
+        null,
+        h('div', { style: sectionTitleStyle }, `自定义入口（${settings.pins.length}）`),
+        h(
+          'div',
+          { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+          h(
+            'select',
+            {
+              style: selectStyle,
+              value: pick,
+              'aria-label': '选择已安装的插件',
+              onChange: (event) => setPick(event.target.value),
+            },
+            bundles === null
+              ? h('option', { value: '' }, '正在读取已安装插件…')
+              : bundles.length === 0
+                ? h('option', { value: '' }, '没有读到已安装的插件')
+                : bundles.map((item) =>
+                    h('option', { key: item.name, value: item.name }, item.title),
+                  ),
+          ),
+          h('input', {
+            style: inputStyle,
+            value: glyphDraft,
+            maxLength: MAX_GLYPH,
+            placeholder: pickedTitle ? defaultGlyph(pickedTitle) : '图标',
+            'aria-label': '图标字符',
+            onChange: (event) => setGlyphDraft(event.target.value),
+          }),
+          chipButton('上排', region === 'panel', () => setRegion('panel')),
+          chipButton('下排', region === 'footer', () => setRegion('footer')),
+          h(
+            'button',
+            {
+              type: 'button',
+              disabled: !pick,
+              onClick: () => {
+                if (!pick) return;
+                addPin(pick, glyphDraft, region);
+                setGlyphDraft('');
+              },
+              style: {
+                flex: 'none',
+                height: '32px',
+                padding: '0 14px',
+                borderRadius: '8px',
+                border: 0,
+                cursor: pick ? 'pointer' : 'default',
+                font: 'inherit',
+                fontSize: '13px',
+                fontWeight: 500,
+                color: '#ffffff',
+                background: pick
+                  ? 'var(--dsw-alias-state-business-primary, #1f6feb)'
+                  : 'var(--dsw-alias-interactive-bg-hover, #d8dbe0)',
+              },
+            },
+            '添加',
+          ),
+        ),
+        settings.pins.length === 0
+          ? h(
+              'div',
+              { style: Object.assign({}, hintStyle, { marginTop: '8px' }) },
+              '选一个已安装的插件，指定上排或下排，点「添加」即可在侧栏得到一个图标；图标字符留空时取插件名首字。',
+            )
+          : h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '6px' } },
+              settings.pins.map((pin, index) => pinRow(pin, index, settings.pins.length)),
+            ),
+      );
+
       return h(
         'div',
         { style: { display: 'flex', flexDirection: 'column', gap: '18px' } },
@@ -631,6 +1191,7 @@ ${sel('[data-sir-off="1"]')},
             SIZES.map(sizeButton),
           ),
         ),
+        customSection,
         ...grouped.map(([group, keys]) =>
           h(
             'div',
@@ -800,13 +1361,25 @@ ${sel('[data-sir-off="1"]')},
       );
     }
 
+    let pinSignature = '';
+
+    /** Cheap guard so unrelated settings changes never re-register entries. */
+    function reloadPinsIfChanged() {
+      const signature = JSON.stringify(settings.pins);
+      if (signature === pinSignature) return;
+      pinSignature = signature;
+      reloadPins();
+    }
+
     /* ------------------------------------------------------------------ *
      * Plugin
      * ------------------------------------------------------------------ */
 
     return {
-      inject: ['slots'],
+      inject: ['slots', 'layout', 'remote', 'remote.pluginManager'],
       apply(ctx) {
+        pluginCtx = ctx;
+        pinSignature = '';
         ctx.effect(
           () => {
             if (typeof document === 'undefined') return () => {};
@@ -841,6 +1414,18 @@ ${sel('[data-sir-off="1"]')},
             };
           },
           'sidebarIconRow.discovery',
+        );
+
+        ctx.effect(
+          () => {
+            reloadPinsIfChanged();
+            const off = subscribe(reloadPinsIfChanged);
+            return () => {
+              off();
+              disposePins();
+            };
+          },
+          'sidebarIconRow.pins',
         );
 
         ctx.slots.inject('plugins.bundle.config', () =>

@@ -1,8 +1,8 @@
 {
   "name": "dsh-sidebar-icon-row",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Turn DeepSeek Harness sidebar entries into a compact icon row with adjustable icon size, per-entry visibility and ordering, plus a Settings shortcut in the footer row.",
+  "description": "Turn DeepSeek Harness sidebar entries into a compact icon row with adjustable icon size, per-entry visibility and ordering, plus a Settings shortcut in the footer row and custom icons for any installed plugin in either sidebar region.",
   "license": "MIT",
   "type": "module",
   "exports": {
